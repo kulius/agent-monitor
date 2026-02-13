@@ -1,7 +1,162 @@
-# Tauri + Vue + TypeScript
+# Agent Monitor
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+> Tauri 桌面應用 — 像素風虛擬辦公室，讓每個終端機變成會動的小員工，即時顯示 Claude Code 工作狀態。
 
-## Recommended IDE Setup
+![Tauri](https://img.shields.io/badge/Tauri-2.0-blue?logo=tauri)
+![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vuedotjs)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178c6?logo=typescript)
+![Rust](https://img.shields.io/badge/Rust-Backend-orange?logo=rust)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-- [VS Code](https://code.visualstudio.com/) + [Vue - Official](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## 功能特色
+
+- **Terminal 多分頁** — 內建 xterm.js 終端機，支援多分頁切換、儲存/還原 tab 配置
+- **像素風 Worker Bar** — 每個 terminal 對應一個像素小人，透過動畫即時反映 Claude 狀態（idle / working / waiting / completed）
+- **Claude 狀態偵測** — 自動解析終端機輸出，辨識 Claude Code 的工作階段並觸發對應動畫與音效
+- **File Explorer** — 可收合側邊欄，支援樹狀瀏覽、隱藏檔切換、LRU 快取
+- **背景服務管理** — 獨立管理 Odoo server、cloudflared 等長駐服務，不占用 terminal tab
+- **Agent 監控面板** — 透過 WebSocket 連線 IPC Server，即時追蹤 agent 執行狀態與歷史紀錄
+- **System Tray** — 最小化至系統匣，常駐桌面
+
+## UI 佈局
+
+```
+┌──────────────────────────────────────────────────┐
+│  🤖 Agent Monitor              [📁] [📊]        │  ← Header
+├──────────────────────────────────────────────────┤
+│  🧑‍💻  🧑‍💻  🧑‍💻  🧑‍💻                                   │  ← Worker Bar（像素小人列）
+├──────┬───────────────────────────────────────────┤
+│      │ Tab1 | Tab2 | Tab3           [+] [💾]    │  ← Terminal Tabs
+│ File │┌─────────────────────────────────────────┐│
+│  Ex  ││                                         ││
+│ plor ││           xterm.js Terminal              ││  ← Terminal Pane
+│  er  ││                                         ││
+│      │└─────────────────────────────────────────┘│
+├──────┴───────────────────────────────────────────┤
+│  ▼ Agent Panel  [Status] [Services]              │  ← 可收合面板
+│  ┌─────────────────────────────────────────────┐ │
+│  │  Running Agents / Stats / History           │ │
+│  └─────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────┘
+```
+
+## 技術棧
+
+| 層級 | 技術 | 用途 |
+|------|------|------|
+| Framework | Tauri 2.0 | 桌面應用框架（Rust backend） |
+| Frontend | Vue 3.5 + TypeScript | UI 框架 |
+| State | Pinia 3 | 狀態管理 |
+| Terminal | xterm.js 6 | 終端機模擬器 |
+| PTY | portable-pty 0.9 | 偽終端（Rust） |
+| IPC | Tauri Events + WebSocket | 雙通道通訊 |
+| Utilities | @vueuse/core 14 | Vue composables |
+
+## 快速開始
+
+### 環境需求
+
+- **Node.js** 18+
+- **Rust** (stable)
+- **pnpm**
+- Windows 10/11
+
+### 安裝與啟動
+
+```bash
+# 安裝依賴
+pnpm install
+
+# 開發模式（Tauri + Vite hot reload）
+pnpm tauri dev
+
+# 僅前端開發（不啟動 Tauri backend）
+pnpm dev
+
+# 建置 release
+pnpm tauri build
+# 產出: src-tauri/target/release/agent-monitor.exe
+```
+
+## 專案結構
+
+```
+src/
+├── App.vue                  # 主佈局
+├── components/
+│   ├── TerminalPane.vue     # xterm.js + lazy init + 狀態偵測
+│   ├── TerminalTabs.vue     # 分頁列 + 儲存/還原
+│   ├── WorkerBar.vue        # 像素員工列
+│   ├── MiniWorker.vue       # 縮小版像素小人 (80x90px)
+│   ├── OfficeWorker.vue     # 完整版像素小人 (120x140px)
+│   ├── AvatarPicker.vue     # 頭像選擇器
+│   ├── FileExplorer.vue     # 檔案總管側邊欄
+│   ├── FileTreeNode.vue     # 樹狀節點
+│   ├── ServicePanel.vue     # 背景服務面板
+│   ├── ServiceEditor.vue    # 服務編輯器
+│   ├── StatusPanel.vue      # Agent 執行狀態
+│   ├── StatsPanel.vue       # Agent 統計
+│   ├── HistoryList.vue      # 執行歷史
+│   └── SettingsBar.vue      # 設定列
+├── stores/
+│   ├── terminal.ts          # Terminal 狀態 + Tauri IPC
+│   ├── service.ts           # 服務管理
+│   ├── fileExplorer.ts      # 檔案總管狀態
+│   ├── monitor.ts           # WebSocket IPC client
+│   └── savedTabs.ts         # Tab 持久化
+└── utils/
+    ├── sounds.ts            # 音效系統
+    └── ansi.ts              # ANSI 序列清除
+
+src-tauri/
+├── src/
+│   ├── main.rs              # Windows 入口
+│   ├── lib.rs               # Tauri 設定 + tray icon
+│   └── terminal.rs          # PTY 管理（parking_lot::Mutex）
+├── Cargo.toml
+└── tauri.conf.json
+```
+
+## 架構說明
+
+### 資料流
+
+```
+Vue Frontend (port 1420)
+  TerminalTabs → TerminalPane → xterm.js
+        ↕                ↕
+  Pinia Stores ←→ invoke() / listen()
+        ↕
+Rust Backend (Tauri)
+  TerminalManager → portable-pty → PowerShell
+        ↓ emit()
+  Events: terminal-output, terminal-closed
+```
+
+### 雙通道 IPC
+
+| 通道 | 用途 | 機制 |
+|------|------|------|
+| **Tauri IPC** | Terminal ↔ PTY 通訊 | `invoke()` 送指令、`listen()` 收事件 |
+| **WebSocket** | Agent 監控 | 連線 `ws://localhost:9527` 追蹤 agent 狀態 |
+
+### Claude 狀態偵測
+
+Terminal 輸出經 ANSI 清除後，以 pattern matching 判斷狀態：
+
+| 狀態 | 觸發條件 | Worker 動畫 |
+|------|---------|------------|
+| `idle` | 15 秒無輸出 | 上下浮動 |
+| `working` | 偵測到處理中關鍵字 | 打字動畫 + 螢幕閃爍 |
+| `waiting` | 出現 `?`、`[Y/n]` 等提示 | 舉手 + "Help!" 泡泡 |
+| `completed` | 出現完成關鍵字 | 立正 + "報告!! 已完成" 泡泡 |
+
+## 快捷鍵
+
+| 快捷鍵 | 功能 |
+|--------|------|
+| `Ctrl + B` | 切換 File Explorer |
+
+## License
+
+MIT
