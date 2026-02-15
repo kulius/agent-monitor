@@ -5,32 +5,57 @@ import ServiceEditor from './ServiceEditor.vue'
 
 const serviceStore = useServiceStore()
 
-const expandedId = ref<string | null>(null)
 const showEditor = ref(false)
 const editingService = ref<ServiceDefinition | undefined>(undefined)
 
-// Auto-scroll log ref
+// Log modal state
+const logServiceId = ref<string | null>(null)
 const logRef = ref<HTMLPreElement | null>(null)
 
-// Auto-scroll to bottom when log updates
+// Auto-scroll log when content updates (only if user is near bottom)
 watch(
   () => {
-    if (!expandedId.value) return 0
-    const inst = serviceStore.instances.find(i => i.serviceId === expandedId.value)
-    return inst?.logBuffer.length ?? 0
+    if (!logServiceId.value) return 0
+    return serviceStore.getLog(logServiceId.value).length
   },
   () => {
-    if (!expandedId.value) return
+    if (!logServiceId.value) return
     nextTick(() => {
       if (logRef.value) {
-        logRef.value.scrollTop = logRef.value.scrollHeight
+        const el = logRef.value
+        const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+        if (isNearBottom) {
+          el.scrollTop = el.scrollHeight
+        }
       }
     })
   }
 )
 
-function toggleExpand(id: string): void {
-  expandedId.value = expandedId.value === id ? null : id
+function openLog(serviceId: string): void {
+  logServiceId.value = logServiceId.value === serviceId ? null : serviceId
+}
+
+function closeLog(): void {
+  logServiceId.value = null
+}
+
+function getLogServiceName(): string {
+  if (!logServiceId.value) return ''
+  const svc = serviceStore.services.find(s => s.id === logServiceId.value)
+  return svc?.name ?? ''
+}
+
+function getLogStartedAt(): string {
+  if (!logServiceId.value) return ''
+  const inst = serviceStore.instances.find(i => i.serviceId === logServiceId.value)
+  if (!inst?.startedAt) return ''
+  return new Date(inst.startedAt).toLocaleTimeString()
+}
+
+function clearLog(): void {
+  if (!logServiceId.value) return
+  serviceStore.clearLog(logServiceId.value)
 }
 
 function openAdd(): void {
@@ -43,7 +68,7 @@ function openEdit(service: ServiceDefinition): void {
   showEditor.value = true
 }
 
-function handleSave(data: { name: string; command: string; cwd: string; color: string }): void {
+function handleSave(data: { name: string; command: string; cwd: string; color: string; linkedTerminalName: string }): void {
   if (editingService.value) {
     serviceStore.updateService(editingService.value.id, data)
   } else {
@@ -57,7 +82,6 @@ const pendingRemoveId = ref<string | null>(null)
 let removeTimer: ReturnType<typeof setTimeout> | null = null
 
 async function handleRemove(id: string): Promise<void> {
-  // First click = arm, second click within 2s = confirm
   if (pendingRemoveId.value === id) {
     pendingRemoveId.value = null
     if (removeTimer) clearTimeout(removeTimer)
@@ -96,16 +120,19 @@ async function handleStop(id: string): Promise<void> {
         class="chip"
         :class="{
           running: serviceStore.getStatus(service.id) === 'running',
-          active: expandedId === service.id
+          active: logServiceId === service.id
         }"
         :style="{ '--svc-color': service.color }"
       >
-        <!-- Status dot + name (click to expand log) -->
         <span
           class="chip-dot"
           :class="serviceStore.getStatus(service.id)"
         />
-        <span class="chip-name" @click="toggleExpand(service.id)">
+        <span
+          class="chip-name"
+          @click="openLog(service.id)"
+          title="View log"
+        >
           {{ service.name }}
         </span>
 
@@ -123,14 +150,8 @@ async function handleStop(id: string): Promise<void> {
           @click.stop="handleStop(service.id)"
         >■</button>
 
-        <!-- View in terminal / Edit / Delete on hover -->
+        <!-- Edit / Delete on hover -->
         <span class="chip-extra">
-          <button
-            v-if="serviceStore.getStatus(service.id) === 'running'"
-            class="chip-btn view"
-            title="Open in terminal tab"
-            @click.stop="serviceStore.viewInTerminal(service.id)"
-          >&#x2197;</button>
           <button class="chip-btn" title="Edit" @click.stop="openEdit(service)">✏</button>
           <button
             class="chip-btn del"
@@ -144,12 +165,23 @@ async function handleStop(id: string): Promise<void> {
       <button class="tool-btn add-btn" @click="openAdd">+</button>
     </div>
 
-    <!-- Expanded log (below chip row) -->
-    <div v-if="expandedId" class="log-area">
+    <!-- Log viewer (below chip row, toggleable) -->
+    <div v-if="logServiceId" class="log-area">
+      <div class="log-header">
+        <span class="log-title">{{ getLogServiceName() }} — Log</span>
+        <span class="log-status" :class="serviceStore.getStatus(logServiceId)">
+          {{ serviceStore.getStatus(logServiceId) }}
+        </span>
+        <span v-if="getLogStartedAt()" class="log-started">
+          started {{ getLogStartedAt() }}
+        </span>
+        <button class="log-clear" @click="clearLog" title="Clear log">Clear</button>
+        <button class="log-close" @click="closeLog" title="Close log">×</button>
+      </div>
       <pre
         ref="logRef"
         class="log-output"
-      >{{ serviceStore.getLog(expandedId) || '(no output yet)' }}</pre>
+      >{{ serviceStore.getLog(logServiceId) || '(no output yet)' }}</pre>
     </div>
 
     <!-- Editor modal -->
@@ -297,10 +329,6 @@ async function handleStop(id: string): Promise<void> {
   color: var(--error-color);
 }
 
-.chip-btn.view {
-  color: var(--primary-color);
-}
-
 .chip-btn.del:hover {
   color: var(--error-color);
 }
@@ -322,8 +350,80 @@ async function handleStop(id: string): Promise<void> {
   padding: 2px 10px 6px;
 }
 
+.log-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 2px;
+}
+
+.log-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.log-status {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.log-status.running {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success-color);
+}
+
+.log-status.stopped {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--text-muted);
+}
+
+.log-status.error {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning-color);
+}
+
+.log-started {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.log-clear {
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 1px 6px;
+  line-height: 1.4;
+}
+
+.log-clear:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg);
+}
+
+.log-close {
+  background: none;
+  border: none;
+  font-size: 14px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.log-close:hover {
+  color: var(--text-primary);
+}
+
 .log-output {
-  max-height: 150px;
+  max-height: 250px;
   overflow-y: auto;
   background: var(--active-bg);
   color: var(--text-primary);

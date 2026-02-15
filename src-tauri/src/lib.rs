@@ -16,7 +16,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(terminal_manager)
+        .manage(terminal_manager.clone())
+        .on_window_event(move |_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                terminal_manager.close_all();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
             terminal::create_terminal,
@@ -26,7 +31,8 @@ pub fn run() {
             terminal::list_terminals,
             terminal::update_terminal_cwd,
             filesystem::read_directory,
-            filesystem::get_home_directory
+            filesystem::get_home_directory,
+            filesystem::list_drives
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -33,6 +33,11 @@ const icon = computed(() => {
 
 async function handleClick() {
   if (props.entry.is_dir) {
+    if (store.isDriveRoot) {
+      // In drive list view, single click navigates into the drive
+      store.navigateToDirectory(props.entry.path)
+      return
+    }
     await store.toggleDirectory(props.entry.path)
   }
   copyPath()

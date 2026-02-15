@@ -3,6 +3,7 @@ import { ref, watch, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { useTerminalStore } from './terminal'
+import { stripAnsi } from '../utils/ansi'
 
 export interface ServiceDefinition {
   id: string
@@ -10,6 +11,7 @@ export interface ServiceDefinition {
   command: string
   cwd: string
   color: string
+  linkedTerminalName?: string  // auto-link restart button to terminal with this name
   createdAt: string
 }
 
@@ -36,9 +38,10 @@ export const useServiceStore = defineStore('service', () => {
   const pendingLogs = new Map<string, string>()
   let flushTimer: ReturnType<typeof setInterval> | null = null
 
-  // Listeners
+  // Listeners (registered lazily — Tauri IPC bridge not ready during store init)
   let unlistenOutput: UnlistenFn | null = null
   let unlistenClosed: UnlistenFn | null = null
+  let listenersReady = false
 
   // Pending terminal map: terminalId → serviceId (for race condition)
   // PTY may emit output before create_terminal resolves and instance is created
@@ -88,7 +91,7 @@ export const useServiceStore = defineStore('service', () => {
     return service
   }
 
-  function updateService(id: string, updates: Partial<Pick<ServiceDefinition, 'name' | 'command' | 'cwd' | 'color'>>): void {
+  function updateService(id: string, updates: Partial<Pick<ServiceDefinition, 'name' | 'command' | 'cwd' | 'color' | 'linkedTerminalName'>>): void {
     services.value = services.value.map(s =>
       s.id === id ? { ...s, ...updates } : s
     )
@@ -104,19 +107,9 @@ export const useServiceStore = defineStore('service', () => {
     pendingLogs.delete(id)
   }
 
-  // Light strip: only remove OSC (title) and carriage returns, keep readable text
-  function lightStrip(text: string): string {
-    return text
-      .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC sequences
-      .replace(/\x1b\][^\x07\x1b]{0,256}/g, '')           // OSC truncated
-      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')              // CSI (colors, cursor)
-      .replace(/\x1b[^[\]P_^]/g, '')                       // Simple escapes
-      .replace(/\r/g, '')                                   // Carriage returns
-  }
-
   // Log management - non-reactive accumulation + periodic flush
   function accumulateLog(serviceId: string, data: string): void {
-    const cleaned = lightStrip(data)
+    const cleaned = stripAnsi(data)
     const existing = pendingLogs.get(serviceId) ?? ''
     pendingLogs.set(serviceId, existing + cleaned)
   }
@@ -160,6 +153,46 @@ export const useServiceStore = defineStore('service', () => {
     }
   }
 
+  // Lazy listener registration — Tauri IPC bridge is not ready during store init,
+  // so we register listeners on first use (when user triggers a service operation).
+  async function ensureListeners(): Promise<void> {
+    if (listenersReady) return
+    listenersReady = true
+
+    unlistenOutput = await listen<{ id: number; data: string }>('terminal-output', (event) => {
+      const { id, data } = event.payload
+      const instance = instances.value.find(i => i.terminalId === id)
+      if (instance) {
+        accumulateLog(instance.serviceId, data)
+        return
+      }
+      // Race condition: PTY output arrived before instance was created
+      const pendingServiceId = pendingTerminalMap.get(id)
+      if (pendingServiceId) {
+        accumulateLog(pendingServiceId, data)
+        return
+      }
+      // Buffer unmatched output briefly — PTY may emit during create_terminal await
+      const buf = unmatchedBuffer.get(id) ?? []
+      buf.push(data)
+      unmatchedBuffer.set(id, buf)
+      // Auto-expire after 5s to prevent memory leaks
+      if (buf.length === 1) {
+        setTimeout(() => unmatchedBuffer.delete(id), 5000)
+      }
+    })
+
+    unlistenClosed = await listen<number>('terminal-closed', (event) => {
+      const terminalId = event.payload
+      const instance = instances.value.find(i => i.terminalId === terminalId)
+      if (instance && instance.status === 'running') {
+        instances.value = instances.value.map(i =>
+          i.terminalId === terminalId ? { ...i, status: 'stopped' as const } : i
+        )
+      }
+    })
+  }
+
   // Service lifecycle
   async function startService(id: string): Promise<boolean> {
     const service = services.value.find(s => s.id === id)
@@ -167,6 +200,9 @@ export const useServiceStore = defineStore('service', () => {
 
     const existing = instances.value.find(i => i.serviceId === id)
     if (existing && existing.status === 'running') return true
+
+    // Ensure event listeners are registered (lazy — first call triggers registration)
+    await ensureListeners()
 
     let terminalId: number | null = null
     try {
@@ -205,7 +241,19 @@ export const useServiceStore = defineStore('service', () => {
         unmatchedBuffer.delete(terminalId)
       }
 
-      // Send the command (service store's own listener captures output)
+      // Write startup log entry (not from PTY, always visible)
+      const timestamp = new Date().toLocaleTimeString()
+      accumulateLog(id, `[${timestamp}] Starting: ${service.command}\n`)
+      accumulateLog(id, `[${timestamp}] CWD: ${service.cwd || '(default)'}\n`)
+      accumulateLog(id, `[${timestamp}] Terminal ID: ${terminalId}\n---\n`)
+
+      // cd to working directory first, then execute the command
+      if (service.cwd) {
+        await invoke('write_to_terminal', {
+          id: terminalId,
+          data: `cd "${service.cwd}"\r`
+        })
+      }
       await invoke('write_to_terminal', {
         id: terminalId,
         data: service.command + '\r'
@@ -234,7 +282,8 @@ export const useServiceStore = defineStore('service', () => {
     // Flush any pending logs before closing
     flushLogs()
 
-    try {
+    // Wrap the close operations with a timeout to prevent UI hang
+    const closeOp = async () => {
       // Send Ctrl+C first for graceful shutdown
       await invoke('write_to_terminal', {
         id: instance.terminalId,
@@ -245,9 +294,23 @@ export const useServiceStore = defineStore('service', () => {
       await new Promise(resolve => setTimeout(resolve, 200))
 
       await invoke('close_terminal', { id: instance.terminalId })
+    }
+
+    try {
+      await Promise.race([
+        closeOp(),
+        new Promise<void>(resolve => setTimeout(resolve, 3000)) // 3s timeout
+      ])
     } catch (error) {
       console.error('Failed to close service terminal:', error)
     }
+  }
+
+  async function restartService(id: string): Promise<boolean> {
+    await stopService(id)
+    // Give background thread time to complete ConPTY teardown and release ports
+    await new Promise(resolve => setTimeout(resolve, 500))
+    return startService(id)
   }
 
   async function startAll(): Promise<void> {
@@ -275,6 +338,13 @@ export const useServiceStore = defineStore('service', () => {
     return (instance?.logBuffer ?? '') + pending
   }
 
+  function clearLog(serviceId: string): void {
+    pendingLogs.delete(serviceId)
+    instances.value = instances.value.map(i =>
+      i.serviceId === serviceId ? { ...i, logBuffer: '' } : i
+    )
+  }
+
   // Open service terminal in the terminal tabs for full xterm view
   function viewInTerminal(serviceId: string): void {
     const instance = instances.value.find(i => i.serviceId === serviceId)
@@ -295,46 +365,10 @@ export const useServiceStore = defineStore('service', () => {
     termStore.setActiveTerminal(instance.terminalId)
   }
 
-  // Event listeners — idempotent: cleanup first, then setup
-  async function init(): Promise<void> {
-    // Cleanup old listeners/timer first (HMR safety)
-    cleanup()
-
+  // Init — only loads storage and starts timer (NO listener registration here)
+  function init(): void {
     loadFromStorage()
     startFlushTimer()
-
-    unlistenOutput = await listen<{ id: number; data: string }>('terminal-output', (event) => {
-      const { id, data } = event.payload
-      const instance = instances.value.find(i => i.terminalId === id)
-      if (instance) {
-        accumulateLog(instance.serviceId, data)
-        return
-      }
-      // Race condition: PTY output arrived before instance was created
-      const pendingServiceId = pendingTerminalMap.get(id)
-      if (pendingServiceId) {
-        accumulateLog(pendingServiceId, data)
-        return
-      }
-      // Buffer unmatched output briefly — PTY may emit during create_terminal await
-      const buf = unmatchedBuffer.get(id) ?? []
-      buf.push(data)
-      unmatchedBuffer.set(id, buf)
-      // Auto-expire after 5s to prevent memory leaks
-      if (buf.length === 1) {
-        setTimeout(() => unmatchedBuffer.delete(id), 5000)
-      }
-    })
-
-    unlistenClosed = await listen<number>('terminal-closed', (event) => {
-      const terminalId = event.payload
-      const instance = instances.value.find(i => i.terminalId === terminalId)
-      if (instance && instance.status === 'running') {
-        instances.value = instances.value.map(i =>
-          i.terminalId === terminalId ? { ...i, status: 'stopped' as const } : i
-        )
-      }
-    })
   }
 
   function cleanup(): void {
@@ -348,15 +382,14 @@ export const useServiceStore = defineStore('service', () => {
       unlistenClosed()
       unlistenClosed = null
     }
+    listenersReady = false
   }
 
   // Auto-save on changes
   watch(services, saveToStorage, { deep: true })
 
-  // Auto-init on store creation (handles HMR re-creation)
-  init().catch((err) => {
-    console.error('Service store auto-init failed:', err)
-  })
+  // Sync init on store creation (no async needed — listeners are lazy)
+  init()
 
   return {
     services,
@@ -372,7 +405,9 @@ export const useServiceStore = defineStore('service', () => {
     stopAll,
     getStatus,
     getLog,
+    clearLog,
     viewInTerminal,
+    restartService,
     init,
     cleanup
   }

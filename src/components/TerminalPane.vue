@@ -82,6 +82,49 @@ function initTerminal() {
     store.resizeTerminal(props.terminalId, cols, rows)
   })
 
+  // Clipboard: Ctrl+Shift+C to copy, Ctrl+Shift+V to paste
+  // Also: right-click copies selection (or pastes if no selection)
+  terminal.attachCustomKeyEventHandler((ev) => {
+    if (ev.type !== 'keydown') return true
+
+    // Ctrl+Shift+C → copy selection to clipboard
+    if (ev.ctrlKey && ev.shiftKey && ev.code === 'KeyC') {
+      const selection = terminal?.getSelection()
+      if (selection) {
+        navigator.clipboard.writeText(selection)
+      }
+      return false
+    }
+
+    // Ctrl+Shift+V → paste from clipboard
+    if (ev.ctrlKey && ev.shiftKey && ev.code === 'KeyV') {
+      navigator.clipboard.readText().then(text => {
+        if (text && terminal) {
+          store.writeToTerminal(props.terminalId, text)
+        }
+      })
+      return false
+    }
+
+    return true
+  })
+
+  // Right-click: copy selection or paste
+  terminalRef.value.addEventListener('contextmenu', (e) => {
+    e.preventDefault()
+    const selection = terminal?.getSelection()
+    if (selection) {
+      navigator.clipboard.writeText(selection)
+      terminal?.clearSelection()
+    } else {
+      navigator.clipboard.readText().then(text => {
+        if (text && terminal) {
+          store.writeToTerminal(props.terminalId, text)
+        }
+      })
+    }
+  })
+
   isInitialized.value = true
 
   // Write any buffered output
@@ -102,7 +145,7 @@ function initTerminal() {
   })
 }
 
-// Claude Code thinking verbs (used as Set for O(1) lookup)
+// Thinking verbs used by AI coding agents (Set for O(1) lookup)
 const THINKING_VERBS = new Set([
   'thinking', 'pondering', 'befuddling', 'cogitating', 'ruminating',
   'musing', 'deliberating', 'considering', 'reflecting', 'contemplating',
@@ -127,7 +170,9 @@ function isThinkingLine(text: string): boolean {
 // IMPORTANT: Do NOT add the 'g' flag to these patterns.
 // Using .test() with 'g' flag causes stateful lastIndex behavior
 // that produces alternating true/false results.
-const CLAUDE_PATTERNS = {
+//
+// Supports: Claude Code, OpenCode, and similar AI coding agents
+const AGENT_PATTERNS = {
   waiting: [
     /\?\s*$/m,
     /\[Y\/n\]/i,
@@ -135,29 +180,44 @@ const CLAUDE_PATTERNS = {
     /Press Enter/i,
     /waiting for.*input/i,
     /please (choose|select|enter)/i,
+    // Claude Code permission prompts
     /Allow once/i,
     /Allow always/i,
     /Do you want to proceed/i,
+    // OpenCode permission prompts
+    /\b(?:approve|allow|deny|ask)\b.*(?:tool|bash|edit|write)/i,
+    /permission.*(?:required|needed)/i,
   ],
   completed: [
     /completed successfully/i,
     /task complete/i,
     /已完成/,
     /完成了/,
+    // Claude Code cost summary
     /Total cost:/,
     /Total cost:.*\d+ tool use/is,
+    // OpenCode session summary patterns
+    /session (?:complete|ended|finished)/i,
+    /tokens?\s*used/i,
   ],
   working: [
-    // Thought duration indicator
+    // Thought duration indicator (both agents)
     /\(thought for \d+s\)/,
-    // Tool calls
+    // Claude Code tool calls (PascalCase)
     /(?:Read|Write|Edit|Bash|Grep|Glob|Task|Explore|WebSearch|WebFetch|TodoWrite|TodoRead|NotebookEdit)\s*\(/,
-    // Hook execution
+    // OpenCode tool calls (lowercase)
+    /(?:bash|edit|write|patch|read|grep|glob|list|skill|todowrite|todoread|webfetch|websearch|question|lsp)\s*\(/,
+    // Hook execution (Claude Code)
     /Running (?:PreToolUse|PostToolUse|Stop) hook/i,
-    // Structural symbols from Claude Code output
+    // Structural symbols from agent TUI output
     /[├└│●]\s+\S/,
-    // "esc to interrupt" prompt
+    // "esc to interrupt" prompt (Claude Code)
     /esc to interrupt/i,
+    // OpenCode agent activity
+    /\b(?:Build|Plan|Explore|General)\b.*(?:agent|thinking|working)/i,
+    // Generic tool execution indicators
+    /Executing.*tool/i,
+    /Running command/i,
   ]
 }
 
@@ -197,7 +257,7 @@ function resetIdleTimer() {
   }, IDLE_TIMEOUT_MS)
 }
 
-function detectClaudeStatus(data: string) {
+function detectAgentStatus(data: string) {
   const clean = stripAnsi(data)
   outputBuffer += clean
 
@@ -217,7 +277,7 @@ function detectClaudeStatus(data: string) {
     }
 
     // Priority: waiting > completed > working
-    for (const pattern of CLAUDE_PATTERNS.waiting) {
+    for (const pattern of AGENT_PATTERNS.waiting) {
       if (pattern.test(outputBuffer)) {
         setStatus('waiting')
         outputBuffer = outputBuffer.slice(-500)
@@ -225,7 +285,7 @@ function detectClaudeStatus(data: string) {
       }
     }
 
-    for (const pattern of CLAUDE_PATTERNS.completed) {
+    for (const pattern of AGENT_PATTERNS.completed) {
       if (pattern.test(outputBuffer)) {
         setStatus('completed')
         outputBuffer = outputBuffer.slice(-500)
@@ -240,7 +300,7 @@ function detectClaudeStatus(data: string) {
       return
     }
 
-    for (const pattern of CLAUDE_PATTERNS.working) {
+    for (const pattern of AGENT_PATTERNS.working) {
       if (pattern.test(outputBuffer)) {
         setStatus('working')
         outputBuffer = outputBuffer.slice(-500)
@@ -254,7 +314,7 @@ async function setupOutputListener() {
   unlistenOutput = await listen<{ id: number; data: string }>('terminal-output', (event) => {
     if (event.payload.id === props.terminalId) {
       // Always detect status regardless of initialization
-      detectClaudeStatus(event.payload.data)
+      detectAgentStatus(event.payload.data)
 
       if (terminal && isInitialized.value) {
         // Terminal is ready, write directly
@@ -352,9 +412,26 @@ watch(
   }
 )
 
+// Reset display when triggered from store (targeted by terminal ID)
+watch(
+  () => store.resetTargetId,
+  (targetId) => {
+    if (targetId === props.terminalId && terminal && fitAddon) {
+      // 1. Clear xterm.js buffer and state
+      terminal.reset()
+      // 2. Refit to recalculate dimensions
+      fitAddon.fit()
+      // 3. Send resize to PTY (forces TUI app to redraw via SIGWINCH)
+      const { cols, rows } = terminal
+      store.resizeTerminal(props.terminalId, cols, rows)
+    }
+  }
+)
+
 defineExpose({
   focus: () => terminal?.focus(),
-  fit: () => fitAddon?.fit()
+  fit: () => fitAddon?.fit(),
+  resetDisplay: () => store.triggerResetDisplay()
 })
 </script>
 
@@ -402,14 +479,6 @@ defineExpose({
 }
 
 :deep(.xterm) {
-  height: 100%;
-}
-
-:deep(.xterm-viewport) {
-  overflow-y: auto !important;
-}
-
-:deep(.xterm-screen) {
   height: 100%;
 }
 </style>

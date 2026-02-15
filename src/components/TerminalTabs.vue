@@ -1,11 +1,60 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, onUnmounted } from 'vue'
 import { useTerminalStore, type ClaudeStatus } from '../stores/terminal'
 import { useSavedTabsStore, type SavedTab } from '../stores/savedTabs'
 import { useServiceStore } from '../stores/service'
 const store = useTerminalStore()
 const savedTabsStore = useSavedTabsStore()
 const serviceStore = useServiceStore()
+
+// Service restart state
+const restartingServiceIds = ref<Set<string>>(new Set())
+const statusMessage = ref<{ text: string; type: 'info' | 'success' | 'error'; color?: string } | null>(null)
+let statusTimer: ReturnType<typeof setTimeout> | null = null
+
+onUnmounted(() => {
+  if (statusTimer) clearTimeout(statusTimer)
+})
+
+function showStatus(text: string, type: 'info' | 'success' | 'error', color?: string, duration = 3000) {
+  if (statusTimer) clearTimeout(statusTimer)
+  statusMessage.value = { text, type, color }
+  statusTimer = setTimeout(() => { statusMessage.value = null }, duration)
+}
+
+// Auto-match terminal name to service via linkedTerminalName config
+function getMatchedService(termName: string) {
+  if (!termName) return null
+  const lower = termName.toLowerCase()
+  return serviceStore.services.find(s =>
+    s.linkedTerminalName && s.linkedTerminalName.toLowerCase() === lower
+  ) ?? null
+}
+
+async function restartMatchedService(serviceId: string, event: MouseEvent) {
+  event.stopPropagation()
+  if (restartingServiceIds.value.has(serviceId)) return
+  const svc = serviceStore.services.find(s => s.id === serviceId)
+  const svcName = svc?.name ?? 'service'
+  const svcColor = svc?.color
+
+  restartingServiceIds.value = new Set([...restartingServiceIds.value, serviceId])
+  showStatus(`Restarting ${svcName}...`, 'info', svcColor, 15000)
+  try {
+    const success = await serviceStore.restartService(serviceId)
+    if (success) {
+      showStatus(`${svcName} restarted`, 'success', svcColor)
+    } else {
+      showStatus(`${svcName} restart failed`, 'error')
+    }
+  } catch {
+    showStatus(`${svcName} restart error`, 'error')
+  } finally {
+    const next = new Set(restartingServiceIds.value)
+    next.delete(serviceId)
+    restartingServiceIds.value = next
+  }
+}
 
 // Status display helpers
 function getStatusIcon(status?: ClaudeStatus): string {
@@ -174,9 +223,10 @@ async function openSavedTab(saved: SavedTab) {
       store.updateTerminalAvatar(newTerm.id, saved.avatarUrl)
     }
 
-    // First cd to directory
+    // First cd to directory (single-quotes to prevent PowerShell injection)
     setTimeout(() => {
-      store.writeToTerminal(newTerm.id, `cd "${saved.cwd}"\r`)
+      const safeCwd = saved.cwd.replace(/'/g, "''")
+      store.writeToTerminal(newTerm.id, `cd '${safeCwd}'\r`)
 
       // Then execute commands line by line
       if (saved.commands && saved.commands.trim()) {
@@ -252,6 +302,18 @@ function removeSavedTab(id: string, event: MouseEvent) {
           {{ getStatusText(term.claudeStatus) }}
         </span>
 
+        <!-- Service restart button (auto-matched by terminal name) -->
+        <button
+          v-if="getMatchedService(term.name)"
+          class="restart-btn"
+          :class="{ spinning: restartingServiceIds.has(getMatchedService(term.name)!.id) }"
+          :style="{ color: getMatchedService(term.name)!.color }"
+          @click="restartMatchedService(getMatchedService(term.name)!.id, $event)"
+          :title="'Restart ' + getMatchedService(term.name)!.name"
+        >
+          ↻
+        </button>
+
         <button
           class="save-btn"
           @click.stop="saveCurrentTab(term.id)"
@@ -269,6 +331,30 @@ function removeSavedTab(id: string, event: MouseEvent) {
         </button>
       </div>
     </div>
+
+    <!-- Status toast -->
+    <transition name="toast">
+      <span
+        v-if="statusMessage"
+        :class="['status-toast', `toast-${statusMessage.type}`]"
+        :style="statusMessage.color ? { borderColor: statusMessage.color } : {}"
+      >
+        <span
+          v-if="statusMessage.type === 'info'"
+          class="toast-spinner"
+          :style="statusMessage.color ? { borderTopColor: statusMessage.color } : {}"
+        ></span>
+        {{ statusMessage.text }}
+      </span>
+    </transition>
+
+    <button
+      class="tool-btn-small"
+      @click="store.triggerResetDisplay()"
+      title="Reset terminal display"
+    >
+      ↻
+    </button>
 
     <button
       class="saved-btn"
@@ -396,7 +482,7 @@ function removeSavedTab(id: string, event: MouseEvent) {
   color: var(--text-muted);
   white-space: nowrap;
   min-width: 80px;
-  max-width: 180px;
+  max-width: 200px;
   transition: all 0.15s ease;
 }
 
@@ -499,6 +585,40 @@ function removeSavedTab(id: string, event: MouseEvent) {
   outline: none;
 }
 
+/* Service restart button */
+.restart-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 2px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: bold;
+  opacity: 0.6;
+  transition: all 0.15s ease;
+}
+
+.restart-btn:hover {
+  opacity: 1;
+  background: rgba(100, 180, 255, 0.15);
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.restart-btn.spinning {
+  opacity: 1 !important;
+  animation: spin 0.8s linear infinite;
+  pointer-events: none;
+}
+
 .save-btn {
   display: flex;
   align-items: center;
@@ -548,6 +668,82 @@ function removeSavedTab(id: string, event: MouseEvent) {
 .close-btn:hover {
   background: rgba(255, 100, 100, 0.2);
   color: #ff6464;
+}
+
+/* Status toast */
+.status-toast {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  background: var(--panel-bg);
+  color: var(--text-primary);
+}
+
+.toast-info {
+  color: var(--text-muted);
+}
+
+.toast-success {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: #22c55e;
+  color: #22c55e;
+}
+
+.toast-error {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.toast-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  flex-shrink: 0;
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.tool-btn-small {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.tool-btn-small:hover {
+  background: var(--hover-bg);
+  color: var(--text-primary);
+  border-color: var(--primary-color);
 }
 
 .saved-btn,

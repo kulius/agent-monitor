@@ -56,6 +56,11 @@ export const useMonitorStore = defineStore('monitor', () => {
   const currentAgent = computed(() => running.value[0] || null)
 
   // Actions
+  // Reconnection state — exponential backoff to avoid console spam
+  let reconnectDelay = 3000
+  const MAX_RECONNECT_DELAY = 30000
+  let hasLoggedDisconnect = false
+
   function connect() {
     if (ws.value?.readyState === WebSocket.OPEN) return
 
@@ -64,9 +69,11 @@ export const useMonitorStore = defineStore('monitor', () => {
 
       ws.value.onopen = () => {
         connected.value = true
+        reconnectDelay = 3000 // Reset backoff on successful connection
+        hasLoggedDisconnect = false
         console.log('[Monitor] Connected to IPC server')
         if (reconnectTimer.value) {
-          clearInterval(reconnectTimer.value)
+          clearTimeout(reconnectTimer.value)
           reconnectTimer.value = null
         }
       }
@@ -82,25 +89,29 @@ export const useMonitorStore = defineStore('monitor', () => {
 
       ws.value.onclose = () => {
         connected.value = false
-        console.log('[Monitor] Disconnected from IPC server')
+        if (!hasLoggedDisconnect) {
+          console.log('[Monitor] Disconnected from IPC server')
+          hasLoggedDisconnect = true
+        }
         scheduleReconnect()
       }
 
-      ws.value.onerror = (error) => {
-        console.error('[Monitor] WebSocket error:', error)
+      ws.value.onerror = () => {
+        // Suppress repeated WebSocket errors — onclose will handle reconnection
       }
-    } catch (error) {
-      console.error('[Monitor] Failed to connect:', error)
+    } catch {
       scheduleReconnect()
     }
   }
 
   function scheduleReconnect() {
     if (reconnectTimer.value) return
-    reconnectTimer.value = window.setInterval(() => {
-      console.log('[Monitor] Attempting to reconnect...')
+    reconnectTimer.value = window.setTimeout(() => {
+      reconnectTimer.value = null
       connect()
-    }, 3000)
+      // Exponential backoff: 3s → 6s → 12s → 24s → 30s (cap)
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY)
+    }, reconnectDelay)
   }
 
   function handleMessage(message: { type: string; data: unknown }) {
@@ -183,7 +194,7 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   function disconnect() {
     if (reconnectTimer.value) {
-      clearInterval(reconnectTimer.value)
+      clearTimeout(reconnectTimer.value)
       reconnectTimer.value = null
     }
     ws.value?.close()

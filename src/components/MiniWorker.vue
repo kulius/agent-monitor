@@ -101,11 +101,13 @@ defineExpose({
 <template>
   <div
     class="mini-worker"
-    :class="{ active: isActive }"
+    :class="[`status-${statusClass}`, { active: isActive }]"
     @click="handleClick"
     @dblclick="handleDoubleClick"
     :title="`${name} - ${status}`"
   >
+    <!-- Status LED -->
+    <div class="status-led" :class="statusClass"></div>
     <!-- Pixel Desk -->
     <div class="desk">
       <div class="monitor">
@@ -154,6 +156,7 @@ defineExpose({
   transition: all 0.2s ease;
   background: var(--panel-bg);
   border: 2px solid transparent;
+  border-left: 3px solid transparent;
   flex-shrink: 0;
 }
 
@@ -165,6 +168,59 @@ defineExpose({
 .mini-worker.active {
   border-color: var(--primary-color);
   box-shadow: 0 0 6px rgba(79, 70, 229, 0.3);
+}
+
+/* Left border status indicator */
+.mini-worker.status-working {
+  border-left: 3px solid #22d3ee;
+}
+.mini-worker.status-waiting {
+  border-left: 3px solid #fb923c;
+  animation: borderPulse 0.6s ease-in-out infinite alternate;
+}
+.mini-worker.status-completed {
+  border-left: 3px solid #4ade80;
+}
+
+@keyframes borderPulse {
+  from { border-left-color: #fb923c; }
+  to { border-left-color: rgba(251, 146, 60, 0.4); }
+}
+
+/* Status LED indicator */
+.status-led {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #666;
+  z-index: 5;
+}
+.status-led.working {
+  background: #22d3ee;
+  box-shadow: 0 0 4px #22d3ee;
+  animation: ledPulse 1s ease-in-out infinite;
+}
+.status-led.waiting {
+  background: #fb923c;
+  box-shadow: 0 0 4px #fb923c;
+  animation: ledBlink 0.6s ease-in-out infinite;
+}
+.status-led.completed {
+  background: #4ade80;
+  box-shadow: 0 0 4px #4ade80;
+}
+
+@keyframes ledPulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px #22d3ee; }
+  50% { opacity: 0.5; box-shadow: 0 0 8px #22d3ee; }
+}
+
+@keyframes ledBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
 }
 
 /* Pixel Desk - scaled down */
@@ -207,11 +263,17 @@ defineExpose({
 
 .screen.completed {
   background: #51cf66;
+  animation: completedPulse 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes completedPulse {
+  from { background: #51cf66; }
+  to { background: #40c057; box-shadow: 0 0 4px rgba(81, 207, 102, 0.6); }
 }
 
 @keyframes screenGlow {
   from { background: #16213e; }
-  to { background: #0f3460; }
+  to { background: #1e90ff; }
 }
 
 @keyframes screenBlink {
@@ -325,7 +387,7 @@ defineExpose({
 
 .pixel-arms.waiting {
   top: 3px;
-  transform: rotate(-30deg);
+  transform: rotate(-25deg);
   transform-origin: bottom center;
   animation: raiseHand 0.5s ease-in-out infinite alternate;
   animation-play-state: running !important;
@@ -339,12 +401,12 @@ defineExpose({
 
 @keyframes typing {
   from { transform: translateY(0); }
-  to { transform: translateY(1px); }
+  to { transform: translateY(2px); }
 }
 
 @keyframes raiseHand {
-  from { transform: rotate(-30deg); }
-  to { transform: rotate(-45deg); }
+  from { transform: rotate(-25deg); }
+  to { transform: rotate(-55deg); }
 }
 
 /* Idle animation - always runs (lightweight, no performance concern) */
@@ -380,15 +442,15 @@ defineExpose({
 }
 
 @keyframes workingSway {
-  from { transform: translateX(-1px); }
-  to { transform: translateX(1px); }
+  from { transform: translateX(-2px); }
+  to { transform: translateX(2px); }
 }
 
 @keyframes waitingBounce {
   0%, 100% { transform: translateY(0); }
-  25% { transform: translateY(-4px); }
+  25% { transform: translateY(-6px); }
   50% { transform: translateY(0); }
-  75% { transform: translateY(-2px); }
+  75% { transform: translateY(-3px); }
 }
 
 /* Speech Bubble - scaled down */
@@ -487,6 +549,11 @@ defineExpose({
 
 .screen.no-animation.waiting {
   animation: screenBlink 0.8s ease-in-out infinite !important;
+  animation-play-state: running !important;
+}
+
+.screen.no-animation.completed {
+  animation: completedPulse 1.5s ease-in-out infinite alternate !important;
   animation-play-state: running !important;
 }
 

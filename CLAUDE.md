@@ -76,16 +76,21 @@ Monitor Store ←→ WebSocket (ws://localhost:9527) ←→ IPC Server
 | `terminal-output` | `{id: number, data: string}` | Rust → Vue |
 | `terminal-closed` | `number` (terminal id) | Rust → Vue |
 
-### Claude Status Detection (TerminalPane.vue)
+### Agent Status Detection (TerminalPane.vue)
 
+Supports **Claude Code** and **OpenCode** (and similar AI coding agents).
 Pattern matching on ANSI-stripped terminal output with 300ms debounce:
 
 ```javascript
 // Priority: waiting > completed > working
-waiting:   /\?\s*$/m, /\[Y\/n\]/i, /please (choose|select)/i
-completed: /completed successfully/i, /task complete/i, /已完成/
-working:   /\.\.\.\s*$/m, /processing|loading/i, thinking verbs (Set, O(1) lookup)
+waiting:   /\?\s*$/m, /\[Y\/n\]/i, /Allow once/i, /approve.*tool/i
+completed: /completed successfully/i, /task complete/i, /Total cost:/i, /session complete/i
+working:   Claude tools (PascalCase), OpenCode tools (lowercase), thinking verbs (Set, O(1) lookup)
 ```
+
+**Clipboard shortcuts (xterm.js):**
+- `Ctrl+Shift+C` → copy selection, `Ctrl+Shift+V` → paste
+- Right-click: copy selection (or paste if none)
 
 **Status stability rules:**
 - Minimum 2s duration for `completed` and `waiting` before allowing change
@@ -115,7 +120,7 @@ working:   /\.\.\.\s*$/m, /processing|loading/i, thinking verbs (Set, O(1) looku
 - Terminal 只有在**被選中時**才初始化 xterm 實例
 - 非活躍的 terminal 會將輸出緩衝到 `pendingOutputBuffer`（最多 50KB）
 - 切換到該 terminal 時才渲染緩衝的輸出
-- 狀態檢測仍然正常工作（即使未初始化也能檢測 Claude 狀態）
+- 狀態檢測仍然正常工作（即使未初始化也能檢測 agent 狀態）
 
 **2. Worker Bar 虛擬列表**
 - 預設只渲染 **8 個** MiniWorker（`MAX_VISIBLE_WORKERS`）
@@ -142,10 +147,11 @@ working:   /\.\.\.\s*$/m, /processing|loading/i, thinking verbs (Set, O(1) looku
 - TerminalTabs 和 WorkerBar 透過 `serviceTerminalIds` computed 過濾 `[svc]` terminals
 - Service stop: sends `\x03` (Ctrl+C) then force close after 200ms grace period
 
-**HMR 安全：**
-- `init()` 是 idempotent：先 `cleanup()` 再 setup
-- Store creation 時自動呼叫 `init()`（不依賴 App.vue onMounted）
-- 確保 HMR 重建 store 時 listeners/timer 不會遺失
+**Lazy Listener 模式（關鍵修復）：**
+- Tauri IPC bridge 在 Pinia store init 時尚未就緒（Windows/WebView2）
+- `init()` 是同步的：只做 `loadFromStorage()` + `startFlushTimer()`
+- `ensureListeners()` 在第一次 `startService()` 時才註冊 `terminal-output` / `terminal-closed` listeners
+- 使用 `listenersReady` flag 確保只註冊一次
 
 **Race Condition 處理（PTY output 時序）：**
 三層緩衝機制解決 PTY 在 `create_terminal` resolve 前就 emit output 的問題：
@@ -157,15 +163,18 @@ working:   /\.\.\.\s*$/m, /processing|loading/i, thinking verbs (Set, O(1) looku
 - `pendingLogs` (非 reactive Map) 累積原始 log
 - 每 300ms `flushLogs()` 批次寫入 reactive `instances[].logBuffer`
 - `flushLogs` 只清除已 flush 的 entries，保留未匹配的 pending data
-- `lightStrip()` 移除 ANSI escape sequences（OSC, CSI, simple escapes）
+- `stripAnsi()` (from `utils/ansi.ts`) 移除 ANSI escape sequences
 - `getLog()` 合併 `logBuffer` + 未 flush 的 `pendingLogs`
+- `clearLog()` 同時清除 reactive `logBuffer` 和非 reactive `pendingLogs`
+- 啟動時寫入 startup log（時間、命令、CWD、Terminal ID）
+- 執行服務前先 `cd` 到工作目錄再執行命令
 
 ### Monitor Store (stores/monitor.ts)
 
 WebSocket client to external IPC server (`ws://localhost:9527`) for agent execution tracking.
 
 **Messages handled:** `initial_state`, `agent_started`, `agent_stopped`, `settings_updated`, `pong`
-**Auto-reconnect:** 3s interval on disconnect
+**Auto-reconnect:** Exponential backoff (3s → 6s → 12s → 24s → 30s cap), silent after first disconnect log
 **Data:** running agents, recent executions (max 20), stats, voice/window settings
 
 ### Key Implementation Details
@@ -185,6 +194,7 @@ WebSocket client to external IPC server (`ws://localhost:9527`) for agent execut
 | Key | Purpose |
 |-----|---------|
 | `agent-monitor-saved-tabs` | Saved tab configurations |
+| `agent-monitor-last-session` | Session restore (cwd, name, avatar per terminal) |
 | `worker-bar-collapsed` | Worker bar collapse state |
 | `agent-monitor-sound-muted` | Sound mute toggle |
 | `agent-monitor-services` | Service definitions |

@@ -196,17 +196,35 @@ impl TerminalManager {
 
     pub fn close_terminal(&self, id: u32) -> Result<(), String> {
         let mut terminals = self.terminals.lock();
-        // Removing the terminal will drop the PtyPair, which closes the PTY
-        // This causes the reader thread to receive EOF and clean up
-        terminals
+        let instance = terminals
             .remove(&id)
             .ok_or_else(|| format!("Terminal {} not found", id))?;
+        // Drop in background thread — ConPTY close on Windows can block the main thread
+        thread::Builder::new()
+            .name(format!("pty-close-{}", id))
+            .spawn(move || {
+                drop(instance);
+            })
+            .map_err(|e| format!("Failed to spawn cleanup thread: {}", e))?;
         Ok(())
     }
 
     pub fn list_terminals(&self) -> Vec<TerminalInfo> {
         let terminals = self.terminals.lock();
         terminals.values().map(|t| t.info.clone()).collect()
+    }
+
+    pub fn close_all(&self) {
+        let instances: Vec<_> = {
+            let mut terminals = self.terminals.lock();
+            terminals.drain().map(|(_, v)| v).collect()
+        };
+        // Drop all in background to avoid ConPTY blocking on Windows
+        if !instances.is_empty() {
+            thread::spawn(move || {
+                drop(instances);
+            });
+        }
     }
 
     pub fn update_terminal_cwd(&self, id: u32, cwd: String) -> Result<(), String> {

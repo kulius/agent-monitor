@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useMonitorStore } from './stores/monitor'
 import { useTerminalStore } from './stores/terminal'
 import { useServiceStore } from './stores/service'
@@ -19,25 +20,108 @@ const terminalStore = useTerminalStore()
 const serviceStore = useServiceStore()
 const fileExplorerStore = useFileExplorerStore()
 
+const SESSION_STORAGE_KEY = 'agent-monitor-last-session'
+
+interface SavedSession {
+  cwd: string
+  name: string
+  avatarUrl?: string
+}
+
+const MAX_RESTORE_SESSIONS = 10
+
+// PowerShell single-quoted strings have no escapes except '' for literal '
+function escapeForPowerShell(path: string): string {
+  return path.replace(/'/g, "''")
+}
+
+function isValidSession(value: unknown): value is SavedSession {
+  if (typeof value !== 'object' || value === null) return false
+  const obj = value as Record<string, unknown>
+  return typeof obj.cwd === 'string' && typeof obj.name === 'string'
+}
+
 const showAgentPanel = ref(false)
 const bottomTab = ref<'agent' | 'services'>('agent')
 const initError = ref<string | null>(null)
 const activeTerminalId = computed(() => terminalStore.activeTerminalId)
 const hasTerminals = computed(() => terminalStore.terminals.length > 0)
 
+function saveCurrentSessions(): void {
+  const sessions: SavedSession[] = terminalStore.terminals
+    .filter(t => !serviceStore.serviceTerminalIds.has(t.id) && t.cwd)
+    .map(t => ({
+      cwd: t.cwd,
+      name: t.name || '',
+      avatarUrl: t.avatarUrl,
+    }))
+  localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions))
+}
+
+function loadSavedSessions(): SavedSession[] {
+  try {
+    const stored = localStorage.getItem(SESSION_STORAGE_KEY)
+    if (stored) {
+      const parsed: unknown = JSON.parse(stored)
+      if (!Array.isArray(parsed)) return []
+      return parsed.filter(isValidSession).filter(s => s.cwd)
+    }
+  } catch { /* ignore */ }
+  return []
+}
+
+async function restoreSessions(): Promise<void> {
+  const sessions = loadSavedSessions().slice(0, MAX_RESTORE_SESSIONS)
+  if (sessions.length === 0) {
+    // No previous sessions — create a blank terminal
+    await terminalStore.createTerminal()
+    return
+  }
+
+  // Clear saved sessions so crash won't loop
+  localStorage.removeItem(SESSION_STORAGE_KEY)
+
+  for (let i = 0; i < sessions.length; i++) {
+    const session = sessions[i]
+    const term = await terminalStore.createTerminal(session.cwd, session.name)
+    if (term) {
+      if (session.avatarUrl) {
+        terminalStore.updateTerminalAvatar(term.id, session.avatarUrl)
+      }
+      // Stagger: wait longer for each terminal to let PTY shells initialize
+      const safeCwd = escapeForPowerShell(session.cwd)
+      setTimeout(() => {
+        terminalStore.writeToTerminal(term.id, `cd '${safeCwd}'; opencode\r`)
+      }, 1000 + i * 500)
+    }
+  }
+}
+
 onMounted(async () => {
   monitorStore.connect()
   // serviceStore auto-inits on creation, no manual init needed
   try {
     await terminalStore.init()
-    // Auto-create first terminal if none exist
-    if (!hasTerminals.value) {
-      await terminalStore.createTerminal()
-    }
+
+    // Restore previous sessions or create a new terminal
+    await restoreSessions()
   } catch (error: unknown) {
     console.error('Failed to initialize terminal:', error)
     initError.value = error instanceof Error ? error.message : 'Failed to initialize terminal'
   }
+
+  // Save sessions and cleanup on window close
+  const appWindow = getCurrentWindow()
+  appWindow.onCloseRequested(async (event) => {
+    event.preventDefault()
+    saveCurrentSessions()
+    try {
+      await terminalStore.cleanup()
+      await serviceStore.cleanup()
+    } finally {
+      await appWindow.close()
+    }
+  })
 
   // Ctrl+B shortcut for file explorer toggle
   window.addEventListener('keydown', handleKeydown)

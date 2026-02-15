@@ -11,7 +11,7 @@ const startWidth = ref(0)
 
 const displayPath = computed(() => {
   const p = store.rootPath
-  if (!p) return ''
+  if (!p) return 'This PC'
   // Show last 2 segments for brevity
   const parts = p.replace(/\\/g, '/').split('/')
   if (parts.length <= 2) return p
@@ -63,7 +63,8 @@ onUnmounted(() => {
 
     <!-- Toolbar -->
     <div class="explorer-toolbar">
-      <button class="tool-btn" @click="store.navigateUp()" title="Go up">⬆</button>
+      <button class="tool-btn" @click="store.navigateUp()" title="Go up" :disabled="store.isDriveRoot">⬆</button>
+      <button class="tool-btn" @click="store.initFromTerminal()" title="Open terminal directory">📂</button>
       <button class="tool-btn" @click="store.refreshAll()" title="Refresh">🔄</button>
       <button
         class="tool-btn"
@@ -82,7 +83,7 @@ onUnmounted(() => {
     <div class="tree-container">
       <div v-if="store.isLoading" class="loading">Loading...</div>
       <div v-else-if="store.visibleRootEntries.length === 0" class="empty">
-        Empty directory
+        {{ store.isDriveRoot ? 'No drives found' : 'Empty directory' }}
       </div>
       <template v-else>
         <FileTreeNode
@@ -168,9 +169,14 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
-.tool-btn:hover {
+.tool-btn:hover:not(:disabled) {
   background: var(--hover-bg);
   border-color: var(--border-color);
+}
+
+.tool-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 
 .tool-btn.active {

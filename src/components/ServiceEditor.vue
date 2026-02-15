@@ -7,7 +7,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  save: [data: { name: string; command: string; cwd: string; color: string }]
+  save: [data: { name: string; command: string; cwd: string; color: string; linkedTerminalName: string }]
   cancel: []
 }>()
 
@@ -26,6 +26,7 @@ const name = ref('')
 const command = ref('')
 const cwd = ref('')
 const color = ref(COLOR_PALETTE[0])
+const linkedTerminalName = ref('')
 
 onMounted(() => {
   if (props.service) {
@@ -33,6 +34,7 @@ onMounted(() => {
     command.value = props.service.command
     cwd.value = props.service.cwd
     color.value = props.service.color
+    linkedTerminalName.value = props.service.linkedTerminalName ?? ''
   }
 })
 
@@ -42,7 +44,8 @@ function handleSave(): void {
     name: name.value.trim(),
     command: command.value.trim(),
     cwd: cwd.value.trim(),
-    color: color.value
+    color: color.value,
+    linkedTerminalName: linkedTerminalName.value.trim()
   })
 }
 </script>
@@ -99,6 +102,17 @@ function handleSave(): void {
             />
           </div>
         </div>
+
+        <label class="field">
+          <span class="field-label">Link to Terminal (name)</span>
+          <input
+            v-model="linkedTerminalName"
+            type="text"
+            placeholder="e.g. jowua"
+            class="field-input"
+          />
+          <span class="field-hint">Terminal tab with this name will show a restart button</span>
+        </label>
       </div>
 
       <div class="editor-footer">
@@ -191,6 +205,12 @@ function handleSave(): void {
 
 .field-input:focus {
   border-color: var(--primary-color);
+}
+
+.field-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.7;
 }
 
 .field-textarea {

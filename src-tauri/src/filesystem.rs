@@ -67,6 +67,42 @@ pub fn read_directory(path: String) -> Result<Vec<FileEntry>, String> {
 }
 
 #[tauri::command]
+pub fn list_drives() -> Vec<FileEntry> {
+    #[cfg(target_os = "windows")]
+    {
+        extern "system" {
+            fn GetLogicalDrives() -> u32;
+        }
+        let bitmask = unsafe { GetLogicalDrives() };
+        let mut drives = Vec::new();
+        for i in 0..26u32 {
+            if bitmask & (1 << i) != 0 {
+                let letter = (b'A' + i as u8) as char;
+                drives.push(FileEntry {
+                    name: format!("{}:", letter),
+                    path: format!("{}:\\", letter),
+                    is_dir: true,
+                    is_hidden: false,
+                    size: 0,
+                });
+            }
+        }
+        drives
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![FileEntry {
+            name: "/".to_string(),
+            path: "/".to_string(),
+            is_dir: true,
+            is_hidden: false,
+            size: 0,
+        }]
+    }
+}
+
+#[tauri::command]
 pub fn get_home_directory() -> Result<String, String> {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))

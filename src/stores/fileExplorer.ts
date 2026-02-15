@@ -39,6 +39,8 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     return directoryCache.get(rootPath.value) ?? []
   })
 
+  const isDriveRoot = computed(() => rootPath.value === '')
+
   const visibleRootEntries = computed(() => {
     const entries = rootEntries.value
     if (showHiddenFiles.value) return entries
@@ -103,10 +105,43 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
 
   function navigateUp(): void {
     if (!rootPath.value) return
-    const parent = rootPath.value.replace(/[\\/][^\\/]+$/, '')
-    if (parent && parent !== rootPath.value) {
-      navigateToDirectory(parent)
+    // Check if at drive root (e.g. "C:\", "C:", "D:\")
+    if (/^[A-Za-z]:[\\/]?$/.test(rootPath.value)) {
+      navigateToDirectory('')
+      return
     }
+    const parent = rootPath.value.replace(/[\\/][^\\/]+$/, '')
+    if (!parent || parent === rootPath.value) {
+      // Unresolvable parent — fall back to drive list
+      navigateToDirectory('')
+      return
+    }
+    navigateToDirectory(parent)
+  }
+
+  async function loadDrives(): Promise<FileEntry[]> {
+    const DRIVES_KEY = ''
+    const cached = directoryCache.get(DRIVES_KEY)
+    if (cached) return cached
+
+    const pending = pendingLoads.get(DRIVES_KEY)
+    if (pending) return pending
+
+    const loadPromise = (async () => {
+      try {
+        const entries = await invoke<FileEntry[]>('list_drives')
+        cacheSet(DRIVES_KEY, entries)
+        return entries
+      } catch (error: unknown) {
+        console.error('Failed to list drives:', error)
+        return []
+      } finally {
+        pendingLoads.delete(DRIVES_KEY)
+      }
+    })()
+
+    pendingLoads.set(DRIVES_KEY, loadPromise)
+    return loadPromise
   }
 
   async function navigateToDirectory(path: string): Promise<void> {
@@ -114,7 +149,11 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     expandedDirs.value = new Set()
     isLoading.value = true
     try {
-      await loadDirectory(path)
+      if (path === '') {
+        await loadDrives()
+      } else {
+        await loadDirectory(path)
+      }
     } finally {
       isLoading.value = false
     }
@@ -125,12 +164,11 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     cacheOrder.length = 0
     cacheTrigger.value++
     expandedDirs.value = new Set()
-    if (rootPath.value) {
-      isLoading.value = true
-      loadDirectory(rootPath.value).finally(() => {
-        isLoading.value = false
-      })
-    }
+    isLoading.value = true
+    const loadFn = rootPath.value === '' ? loadDrives() : loadDirectory(rootPath.value)
+    loadFn.finally(() => {
+      isLoading.value = false
+    })
   }
 
   function toggleVisibility(): void {
@@ -184,10 +222,12 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     expandedDirs,
     isLoading,
     // Computed
+    isDriveRoot,
     rootEntries,
     visibleRootEntries,
     // Actions
     loadDirectory,
+    loadDrives,
     toggleDirectory,
     navigateUp,
     navigateToDirectory,

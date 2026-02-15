@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
@@ -19,6 +19,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   // State
   const terminals = ref<TerminalInfo[]>([])
   const activeTerminalId = ref<number | null>(null)
+  const resetTargetId = ref<number | null>(null) // Set to terminal ID to trigger reset
 
   // Listeners
   let unlistenClosed: UnlistenFn | null = null
@@ -153,6 +154,16 @@ export const useTerminalStore = defineStore('terminal', () => {
     )
   }
 
+  function triggerResetDisplay(): void {
+    if (activeTerminalId.value !== null) {
+      // Toggle: set to target ID, then null, to ensure watch fires even for same terminal
+      resetTargetId.value = null
+      nextTick(() => {
+        resetTargetId.value = activeTerminalId.value
+      })
+    }
+  }
+
   function updateTerminalAvatar(id: number, avatarUrl: string | undefined): void {
     terminals.value = terminals.value.map(t =>
       t.id === id ? { ...t, avatarUrl } : t
@@ -163,6 +174,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     // State
     terminals,
     activeTerminalId,
+    resetTargetId,
     // Computed
     activeTerminal,
     terminalCount,
@@ -178,6 +190,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     updateTerminalName,
     updateClaudeStatus,
     clearClaudeStatus,
+    triggerResetDisplay,
     updateTerminalAvatar
   }
 })
